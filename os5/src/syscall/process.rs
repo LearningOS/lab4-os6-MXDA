@@ -1,19 +1,14 @@
 //! Process management syscalls
 
-use crate::mm::{translated_refmut, translated_ref, translated_str};
+use crate::loader::get_app_data_by_name;
+use crate::mm::{translated_refmut, translated_str};
 use crate::task::{
     add_task, current_task, current_user_token, exit_current_and_run_next,
-    suspend_current_and_run_next, TaskStatus, TaskControlBlock, get_current_task_status, 
-    get_syscall_times, get_current_task_first_time, current_task_mmap, current_task_munmap,
-    set_task_priority
+    suspend_current_and_run_next, TaskStatus,
 };
-use crate::mm::{VirtAddr2PhysAddr, VirtAddr};
-use crate::config::MAX_SYSCALL_NUM;
-use crate::fs::{open_file, OpenFlags};
 use crate::timer::get_time_us;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
-use alloc::string::String;
+use crate::config::MAX_SYSCALL_NUM;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -64,16 +59,14 @@ pub fn sys_fork() -> isize {
 pub fn sys_exec(path: *const u8) -> isize {
     let token = current_user_token();
     let path = translated_str(token, path);
-    if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
-        let all_data = app_inode.read_all();
+    if let Some(data) = get_app_data_by_name(path.as_str()) {
         let task = current_task().unwrap();
-        task.exec(all_data.as_slice());
+        task.exec(data);
         0
     } else {
         -1
     }
 }
-
 
 /// If there is not a child process whose pid is same as given, return -1.
 /// Else if there is a child process but it is still running, return -2.
@@ -115,70 +108,37 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
 // YOUR JOB: 引入虚地址后重写 sys_get_time
 pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
     let _us = get_time_us();
-    let current_token = current_user_token();
-    let ts = VirtAddr2PhysAddr(current_token, _ts as *const u8) as *mut TimeVal;
-    unsafe {
-        *ts = TimeVal {
-            sec: _us / 1_000_000,
-            usec: _us % 1_000_000, 
-        };
-    }
+    // unsafe {
+    //     *ts = TimeVal {
+    //         sec: us / 1_000_000,
+    //         usec: us % 1_000_000,
+    //     };
+    // }
     0
 }
 
 // YOUR JOB: 引入虚地址后重写 sys_task_info
 pub fn sys_task_info(ti: *mut TaskInfo) -> isize {
-    let current_token = current_user_token();
-    let _ti = VirtAddr2PhysAddr(current_token, ti as *const u8) as *mut TaskInfo;
-    unsafe {
-        *_ti = TaskInfo {
-            status: get_current_task_status(),
-            syscall_times: get_syscall_times(),
-            time: (get_time_us() / 1000 - get_current_task_first_time()),
-        };
-    }
-    0
+    -1
 }
 
 // YOUR JOB: 实现sys_set_priority，为任务添加优先级
-pub fn sys_set_priority(prio: isize) -> isize {
-    if prio < 2 {
-        return -1;
-    }
-    set_task_priority(prio as usize);
-    //println!("test {}", prio);
-    prio as isize
+pub fn sys_set_priority(_prio: isize) -> isize {
+    -1
 }
 
 // YOUR JOB: 扩展内核以实现 sys_mmap 和 sys_munmap
 pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    current_task_mmap(_start, _len, _port)
+    -1
 }
 
 pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    current_task_munmap(_start, _len)
+    -1
 }
 
 //
 // YOUR JOB: 实现 sys_spawn 系统调用
 // ALERT: 注意在实现 SPAWN 时不需要复制父进程地址空间，SPAWN != FORK + EXEC 
 pub fn sys_spawn(_path: *const u8) -> isize {
-    let token = current_user_token();
-    let path = translated_str(token, _path);
-    if let Some(inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
-        let data = inode.read_all();
-        let new_task: Arc<TaskControlBlock> = Arc::new(TaskControlBlock::new(data.as_slice()));
-        let mut new_inner = new_task.inner_exclusive_access();
-        let parent = current_task().unwrap();
-        let mut parent_inner = parent.inner_exclusive_access();
-        new_inner.parent = Some(Arc::downgrade(&parent));
-        parent_inner.children.push(new_task.clone());
-        drop(new_inner);
-        drop(parent_inner);
-        let new_pid = new_task.pid.0;
-        add_task(new_task);
-        new_pid as isize
-    } else {
-        -1
-    }
+    -1
 }

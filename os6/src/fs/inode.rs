@@ -9,6 +9,7 @@ use lazy_static::*;
 use bitflags::*;
 use alloc::vec::Vec;
 use super::File;
+use super::StatMode;
 use crate::mm::UserBuffer;
 
 /// A wrapper around a filesystem inode
@@ -138,7 +139,15 @@ pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
             })
     }
 }
-
+pub fn link_file(old_name: &str, new_name: &str) -> Option<()> {
+    if old_name == new_name {
+        return None;
+    }
+    ROOT_INODE.link(old_name, new_name)
+}
+pub fn unlink_file(name: &str) -> Option<()> {
+    ROOT_INODE.unlink(name)
+}
 impl File for OSInode {
     fn readable(&self) -> bool { self.readable }
     fn writable(&self) -> bool { self.writable }
@@ -165,5 +174,18 @@ impl File for OSInode {
             total_write_size += write_size;
         }
         total_write_size
+    }
+    fn fstat(&self) -> (u64, StatMode, u32) {
+        let mut inner = self.inner.exclusive_access();
+        let ino = inner.inode.read_inode_id();
+        let (is_file, is_dir) = inner.inode.read_inode_mode();
+        let mut mode: StatMode = StatMode::NULL;
+        if is_file {
+            mode = StatMode::FILE;
+        } else {
+            mode = StatMode::DIR;
+        }
+        let nlink = inner.inode.read_inode_nlink();
+        (ino, mode, nlink)
     }
 }

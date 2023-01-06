@@ -7,6 +7,7 @@ use super::{
     DIRENT_SZ,
     get_block_cache,
     block_cache_sync_all,
+
 };
 use alloc::sync::Arc;
 use alloc::string::String;
@@ -207,5 +208,97 @@ impl Inode {
             }
         });
         block_cache_sync_all();
+    }
+    pub fn link(&self, oldname: &str, newname: &str) -> Option<()> {
+        let mut fs = self.fs.lock();
+        let old_inode_id =
+            self.read_disk_inode(|root_inode| self.find_inode_id(oldname, root_inode));
+        if old_inode_id.is_none() {
+            return None;
+        }
+        let (block_id, block_offset) = fs.get_disk_inode_pos(old_inode_id.unwrap());
+        get_block_cache(block_id as usize, Arc::clone(&self.block_device))
+            .lock()
+            .modify(block_offset, |n: &mut DiskInode| n.nlink += 1);
+        self.modify_disk_inode(|root_inode| {
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            let new_size = (file_count + 1) * DIRENT_SZ;
+            self.increase_size(new_size as u32, root_inode, &mut fs);
+            let dirent = DirEntry::new(newname, old_inode_id.unwrap());
+            root_inode.write_at(
+                file_count * DIRENT_SZ,
+                dirent.as_bytes(),
+                &self.block_device,
+            );
+        });
+        block_cache_sync_all();
+        Some(())
+    }
+	pub fn unlink(&self, name: &str) -> Option<()> {
+        let mut fs = self.fs.lock();
+        let mut inid: Option<u32> = None;
+        let mut v: Vec<DirEntry> = Vec::new();
+        self.modify_disk_inode(|root_inode| {
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            for i in 0..file_count {
+                let mut dirent = DirEntry::empty();
+                assert_eq!(
+                    root_inode.read_at(i * DIRENT_SZ, dirent.as_bytes_mut(), &self.block_device,),
+                    DIRENT_SZ,
+                );
+                if dirent.name() != name {
+                    v.push(dirent);
+                } else {
+                    inid = Some(dirent.inode_number());
+                }
+            }
+        });
+        self.modify_disk_inode(|root_inode| {
+            let size = root_inode.size;
+            let data_blocks_dealloc = root_inode.clear_size(&self.block_device);
+            assert!(data_blocks_dealloc.len() == DiskInode::total_blocks(size) as usize);
+            for data_block in data_blocks_dealloc.into_iter() {
+                fs.dealloc_data(data_block);
+            }
+            self.increase_size((v.len() * DIRENT_SZ) as u32, root_inode, &mut fs);
+            for (i, dirent) in v.iter().enumerate() {
+                root_inode.write_at(i * DIRENT_SZ, dirent.as_bytes(), &self.block_device);
+            }
+        });
+        if inid.is_none() {
+            return None;
+        }
+        let (block_id, block_offset) = fs.get_disk_inode_pos(inid.unwrap());
+        get_block_cache(block_id as usize, Arc::clone(&self.block_device))
+            .lock()
+            .modify(block_offset, |n: &mut DiskInode| {
+                n.nlink -= 1;
+                if n.nlink == 0 {
+                    let size = n.size;
+                    let data_blocks_dealloc = n.clear_size(&self.block_device);
+                    assert!(data_blocks_dealloc.len() == DiskInode::total_blocks(size) as usize);
+                    for data_block in data_blocks_dealloc.into_iter() {
+                        fs.dealloc_data(data_block);
+                    }
+                }
+             });
+        block_cache_sync_all();
+        Some(())
+    }
+    pub fn read_inode_id(&self) -> u64 {
+        let fs = self.fs.lock();
+        fs.get_inode_id(self.block_id, self.block_offset) as u64
+    }
+    pub fn read_inode_mode(&self) -> (bool, bool) {
+        let (is_file, is_dir) = self.read_disk_inode(|disk_inode| {
+            (disk_inode.is_file(), disk_inode.is_dir())
+        });
+        (is_file, is_dir)
+    }
+    pub fn read_inode_nlink(&self) -> u32 {
+        let nlink = self.read_disk_inode(|disk_inode| {
+            disk_inode.nlink
+        });
+        nlink
     }
 }

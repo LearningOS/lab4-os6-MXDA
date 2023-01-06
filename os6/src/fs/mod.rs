@@ -2,6 +2,7 @@ mod stdio;
 mod inode;
 
 use crate::mm::UserBuffer;
+pub use inode::{link_file, unlink_file};
 
 /// The common abstraction of all IO resources
 pub trait File : Send + Sync {
@@ -9,6 +10,7 @@ pub trait File : Send + Sync {
     fn writable(&self) -> bool;
     fn read(&self, buf: UserBuffer) -> usize;
     fn write(&self, buf: UserBuffer) -> usize;
+    fn fstat(&self) -> (u64, StatMode, u32);
 }
 
 /// The stat of a inode

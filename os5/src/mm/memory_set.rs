@@ -4,7 +4,7 @@ use super::{frame_alloc, FrameTracker};
 use super::{PTEFlags, PageTable, PageTableEntry};
 use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::{StepByOne, VPNRange};
-use crate::config::{MEMORY_END, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT, USER_STACK_SIZE, MMIO};
+use crate::config::{MEMORY_END, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT, USER_STACK_SIZE};
 use crate::sync::UPSafeCell;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -29,11 +29,6 @@ lazy_static! {
     /// a memory set instance through lazy_static! managing kernel space
     pub static ref KERNEL_SPACE: Arc<UPSafeCell<MemorySet>> =
         Arc::new(unsafe { UPSafeCell::new(MemorySet::new_kernel()) });
-}
-
-/// Get the token of the kernel memory space
-pub fn kernel_token() -> usize {
-    KERNEL_SPACE.exclusive_access().token()
 }
 
 /// memory set structure, controls virtual-memory space
@@ -153,17 +148,6 @@ impl MemorySet {
             ),
             None,
         );
-        info!("mapping memory-mapped registers");
-        for pair in MMIO {
-            memory_set.push(
-                MapArea::new(
-                    (*pair).0.into(),
-                    ((*pair).0 + (*pair).1).into(),
-                    MapType::Identical,
-                    MapPermission::R | MapPermission::W,
-                ),
-            None);
-        }
         memory_set
     }
     /// Include sections in elf and trampoline and TrapContext and user stack,
@@ -267,15 +251,6 @@ impl MemorySet {
     pub fn recycle_data_pages(&mut self) {
         //*self = Self::new_bare();
         self.areas.clear();
-    }
-    pub fn munmap(&mut self, vpn_range: VPNRange) {
-        for vpn in vpn_range {
-            for area in &mut self.areas {
-                if vpn < area.vpn_range.get_end() && vpn >= area.vpn_range.get_start() {
-                    area.unmap_one(&mut self.page_table, vpn);
-                }
-            }
-        }
     }
 }
 
