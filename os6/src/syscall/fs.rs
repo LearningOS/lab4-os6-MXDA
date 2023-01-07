@@ -11,7 +11,7 @@ use crate::fs::Stat;
 use crate::mm::UserBuffer;
 use crate::fs::{link_file, unlink_file};
 use alloc::sync::Arc;
-use crate::mm::{VirtAddr2PhysAddr, VirtAddr};
+use crate::mm::{VirtAddr2PhysAddr, VirtAddr, PhysAddr};
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
@@ -82,25 +82,9 @@ pub fn sys_close(fd: usize) -> isize {
 
 // YOUR JOB: 扩展 easy-fs 和内核以实现以下三个 syscall
 pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
-    /*
-    let task = current_task().unwrap();
-    let mut inner = task.inner_exclusive_access();
-    if fd >= inner.fd_table.len() {
-        return -1;
-    }
-    if inner.fd_table[fd].is_none() {
-        return -1;
-    }
-    unsafe {
-        st.dev: 0,
-        ino: 
-    }
-    0
-    */
     let token = current_user_token();
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
-
     let st = VirtAddr2PhysAddr(token, st as *const u8) as *mut Stat;
     if fd >= inner.fd_table.len() {
         return -1;
@@ -109,6 +93,7 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
         let file = file.clone();
         drop(inner);
         let (ino, mode, nlink) = file.fstat();
+        //println!("test fstat {} {:?} {}", ino, mode, nlink);
         unsafe {
             (*st).dev = 0;
             (*st).ino = ino;

@@ -162,22 +162,16 @@ pub fn sys_munmap(_start: usize, _len: usize) -> isize {
 //
 // YOUR JOB: 实现 sys_spawn 系统调用
 // ALERT: 注意在实现 SPAWN 时不需要复制父进程地址空间，SPAWN != FORK + EXEC 
-pub fn sys_spawn(_path: *const u8) -> isize {
+pub fn sys_spawn(path: *const u8) -> isize {
     let token = current_user_token();
-    let path = translated_str(token, _path);
+    let path = translated_str(token, path);
     if let Some(inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
         let data = inode.read_all();
-        let new_task: Arc<TaskControlBlock> = Arc::new(TaskControlBlock::new(data.as_slice()));
-        let mut new_inner = new_task.inner_exclusive_access();
-        let parent = current_task().unwrap();
-        let mut parent_inner = parent.inner_exclusive_access();
-        new_inner.parent = Some(Arc::downgrade(&parent));
-        parent_inner.children.push(new_task.clone());
-        drop(new_inner);
-        drop(parent_inner);
-        let new_pid = new_task.pid.0;
+        let task = current_task().unwrap();
+        let new_task = task.spawn(data.as_slice());
+        let pid = new_task.pid.0;
         add_task(new_task);
-        new_pid as isize
+        pid as isize
     } else {
         -1
     }
