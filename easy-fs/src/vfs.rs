@@ -234,7 +234,7 @@ impl Inode {
         block_cache_sync_all();
         Some(())
     }
-	pub fn unlink(&self, name: &str) -> Option<()> {
+    pub fn unlink(&self, name: &str) -> Option<()> {
         let mut fs = self.fs.lock();
         let mut inid: Option<u32> = None;
         let mut v: Vec<DirEntry> = Vec::new();
@@ -285,6 +285,7 @@ impl Inode {
         block_cache_sync_all();
         Some(())
     }
+
     pub fn read_inode_id(&self) -> u64 {
         let fs = self.fs.lock();
         fs.get_inode_id(self.block_id, self.block_offset) as u64
