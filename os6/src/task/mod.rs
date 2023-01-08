@@ -17,25 +17,24 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
+use crate::config::PAGE_SIZE;
+use crate::fs::{open_file, OpenFlags};
+use crate::mm::MapPermission;
+use crate::mm::VirtAddr;
+pub use crate::syscall::process::TaskInfo;
+use crate::timer::get_time_us;
 use alloc::sync::Arc;
 use lazy_static::*;
 use manager::fetch_task;
 use switch::__switch;
-use crate::mm::VirtAddr;
-use crate::mm::MapPermission;
-use crate::config::PAGE_SIZE;
-use crate::timer::get_time_us;
-pub use crate::syscall::process::TaskInfo;
-use crate::fs::{open_file, OpenFlags};
 pub use task::{TaskControlBlock, TaskStatus};
-use crate::sbi::shutdown;
+
 pub use context::TaskContext;
 pub use manager::add_task;
 pub use pid::{pid_alloc, KernelStack, PidHandle};
 pub use processor::{
     current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task,
-    get_current_task_status, get_current_task_first_time, update_current_task_syscall_times,
-    get_syscall_times, current_task_mmap, current_task_munmap, set_task_priority
+    PROCESSOR,
 };
 
 /// Make current task suspended and switch to the next task
@@ -61,10 +60,6 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next(exit_code: i32) {
     // take from Processor
     let task = take_current_task().unwrap();
-    if task.pid.0 == 0 {
-        shutdown();
-    }
-    
     // **** access current TCB exclusively
     let mut inner = task.inner_exclusive_access();
     // Change status to Zombie

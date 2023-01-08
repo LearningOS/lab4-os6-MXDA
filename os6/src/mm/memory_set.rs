@@ -4,7 +4,7 @@ use super::{frame_alloc, FrameTracker};
 use super::{PTEFlags, PageTable, PageTableEntry};
 use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::{StepByOne, VPNRange};
-use crate::config::{MEMORY_END, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT, USER_STACK_SIZE, MMIO};
+use crate::config::{MEMORY_END, MMIO, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT, USER_STACK_SIZE};
 use crate::sync::UPSafeCell;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -162,7 +162,8 @@ impl MemorySet {
                     MapType::Identical,
                     MapPermission::R | MapPermission::W,
                 ),
-            None);
+                None,
+            );
         }
         memory_set
     }
@@ -268,14 +269,41 @@ impl MemorySet {
         //*self = Self::new_bare();
         self.areas.clear();
     }
-    pub fn munmap(&mut self, vpn_range: VPNRange) {
-        for vpn in vpn_range {
-            for area in &mut self.areas {
-                if vpn < area.vpn_range.get_end() && vpn >= area.vpn_range.get_start() {
-                    area.unmap_one(&mut self.page_table, vpn);
-                }
+
+    pub fn mmap(
+        &mut self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        permission: MapPermission,
+    ) -> bool {
+        for vpn in VPNRange::new(start_va.floor(), end_va.ceil()) {
+            if self
+                .page_table
+                .translate(vpn)
+                .is_some_and(|pte| pte.is_valid())
+            {
+                debug!("{vpn:?} is already mapped!");
+                return false;
+            }
+            if !self.page_table.mmap(
+                vpn,
+                PTEFlags::V | PTEFlags::from_bits(permission.bits).unwrap(),
+            ) {
+                return false;
             }
         }
+        true
+    }
+
+    pub fn munmap(&mut self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let vpn_start = start_va.floor();
+        let vpn_end = end_va.ceil();
+        for vpn in VPNRange::new(vpn_start, vpn_end) {
+            if !self.page_table.munmap(vpn) {
+                return false;
+            }
+        }
+        true
     }
 }
 

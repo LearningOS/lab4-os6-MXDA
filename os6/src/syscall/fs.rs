@@ -1,17 +1,22 @@
 //! File and filesystem-related syscalls
 
-use crate::mm::translated_byte_buffer;
-use crate::mm::translated_str;
-use crate::mm::translated_refmut;
-use crate::task::current_user_token;
-use crate::task::current_task;
 use crate::fs::open_file;
+use crate::fs::File;
+use crate::fs::OSInode;
 use crate::fs::OpenFlags;
 use crate::fs::Stat;
+use crate::fs::StatMode;
+use crate::fs::ROOT_INODE;
+use crate::mm::translated_byte_buffer;
+use crate::mm::translated_refmut;
+use crate::mm::translated_str;
 use crate::mm::UserBuffer;
-use crate::fs::{link_file, unlink_file};
+use crate::task::current_task;
+use crate::task::current_user_token;
 use alloc::sync::Arc;
-use crate::mm::{VirtAddr2PhysAddr, VirtAddr, PhysAddr};
+use core::any::Any;
+use core::any::TypeId;
+
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
@@ -23,9 +28,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
         let file = file.clone();
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
-        file.write(
-            UserBuffer::new(translated_byte_buffer(token, buf, len))
-        ) as isize
+        file.write(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize
     } else {
         -1
     }
@@ -42,9 +45,7 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
         let file = file.clone();
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
-        file.read(
-            UserBuffer::new(translated_byte_buffer(token, buf, len))
-        ) as isize
+        file.read(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize
     } else {
         -1
     }
@@ -54,10 +55,7 @@ pub fn sys_open(path: *const u8, flags: u32) -> isize {
     let task = current_task().unwrap();
     let token = current_user_token();
     let path = translated_str(token, path);
-    if let Some(inode) = open_file(
-        path.as_str(),
-        OpenFlags::from_bits(flags).unwrap()
-    ) {
+    if let Some(inode) = open_file(path.as_str(), OpenFlags::from_bits(flags).unwrap()) {
         let mut inner = task.inner_exclusive_access();
         let fd = inner.alloc_fd();
         inner.fd_table[fd] = Some(inode);
@@ -85,47 +83,52 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
-    let st = VirtAddr2PhysAddr(token, st as *const u8) as *mut Stat;
-    if fd >= inner.fd_table.len() {
+    info!("fstat {}", fd);
+    if fd <= 2 {
+        // doesn't support std{in, out, err} yet
         return -1;
     }
-    if let Some(file) = &inner.fd_table[fd] {
-        let file = file.clone();
-        drop(inner);
-        let (ino, mode, nlink) = file.fstat();
-        //println!("test fstat {} {:?} {}", ino, mode, nlink);
-        unsafe {
-            (*st).dev = 0;
-            (*st).ino = ino;
-            (*st).mode = mode;
-            (*st).nlink = nlink;
-        }
+    let fd_table = &inner.fd_table;
+    let Some(Some(file)) = fd_table.get(fd) else { return -1;};
+    let file = file.as_ref();
+    // todo: find a sound way to downcast trait object
+    let inode = unsafe { &*(file as *const dyn File as *const OSInode) };
+    // let Some(inode) = (&file as &dyn Any).downcast_ref_unchecked::<OSInode>() else {
+    //     error!("Failed to downcast File to OSInode! typeid: {:?}, OSInode: {:?}", file.type_id(), TypeId::of::<OSInode>());
+    //     return -1;
+    // };
+    let stat = translated_refmut(token, st);
+    *stat = Stat::new(
+        inode.ino(),
+        if inode.is_file() {
+            StatMode::FILE
+        } else {
+            StatMode::DIR
+        },
+        inode.nlink(),
+    );
+    0
+}
+
+pub fn sys_linkat(old_name: *const u8, new_name: *const u8) -> isize {
+    let token = current_user_token();
+    let old_name = translated_str(token, old_name);
+    let new_name = translated_str(token, new_name);
+    info!("Link {} to {}", new_name, old_name);
+    if ROOT_INODE.hard_link(&new_name, &old_name).is_some() {
         0
     } else {
         -1
     }
+    // let Some((inode_id, inode)) = ROOT_INODE.find(&old_name) else { return -1; };
 }
 
-pub fn sys_linkat(oldpath: *const u8, newpath: *const u8) -> isize {
-    let task = current_task().unwrap();
+pub fn sys_unlinkat(name: *const u8) -> isize {
     let token = current_user_token();
-    let oldpath = translated_str(token, oldpath);
-    let newpath = translated_str(token, newpath);
-    if oldpath == newpath {
-       return -1;
+    let name = translated_str(token, name);
+    if ROOT_INODE.unlink(&name) {
+        0
+    } else {
+        -1
     }
-    if link_file(&oldpath, &newpath).is_none() {
-        return -1;
-    }
-    0
-}
-
-pub fn sys_unlinkat(path: *const u8) -> isize {
-    let task = current_task().unwrap();
-    let token = current_user_token();
-    let path = translated_str(token, path);
-    if unlink_file(&path).is_none() {
-        return -1;
-    }
-    0
 }

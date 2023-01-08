@@ -1,19 +1,16 @@
 //! Process management syscalls
 
-use crate::mm::{translated_refmut, translated_ref, translated_str};
-use crate::task::{
-    add_task, current_task, current_user_token, exit_current_and_run_next,
-    suspend_current_and_run_next, TaskStatus, TaskControlBlock, get_current_task_status, 
-    get_syscall_times, get_current_task_first_time, current_task_mmap, current_task_munmap,
-    set_task_priority
-};
-use crate::mm::{VirtAddr2PhysAddr, VirtAddr};
 use crate::config::MAX_SYSCALL_NUM;
 use crate::fs::{open_file, OpenFlags};
+use crate::mm::{translated_ref, translated_refmut, translated_str, MapPermission, VirtAddr};
+use crate::task::{
+    add_task, current_task, current_user_token, exit_current_and_run_next,
+    suspend_current_and_run_next, TaskStatus, PROCESSOR,
+};
 use crate::timer::get_time_us;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use alloc::string::String;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -74,7 +71,6 @@ pub fn sys_exec(path: *const u8) -> isize {
     }
 }
 
-
 /// If there is not a child process whose pid is same as given, return -1.
 /// Else if there is a child process but it is still running, return -2.
 pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
@@ -112,67 +108,117 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
     // ---- release current PCB lock automatically
 }
 
-// YOUR JOB: 引入虚地址后重写 sys_get_time
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    let _us = get_time_us();
-    let current_token = current_user_token();
-    let ts = VirtAddr2PhysAddr(current_token, _ts as *const u8) as *mut TimeVal;
-    unsafe {
-        *ts = TimeVal {
-            sec: _us / 1_000_000,
-            usec: _us % 1_000_000, 
-        };
-    }
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
+    let us = get_time_us();
+    let v_addr: VirtAddr = (ts as usize).into();
+    PROCESSOR.exclusive_access().set_val_in_current_task(
+        v_addr,
+        TimeVal {
+            sec: us / 1_000_000,
+            usec: us % 1_000_000,
+        },
+    );
     0
 }
 
-// YOUR JOB: 引入虚地址后重写 sys_task_info
 pub fn sys_task_info(ti: *mut TaskInfo) -> isize {
-    let current_token = current_user_token();
-    let _ti = VirtAddr2PhysAddr(current_token, ti as *const u8) as *mut TaskInfo;
-    unsafe {
-        *_ti = TaskInfo {
-            status: get_current_task_status(),
-            syscall_times: get_syscall_times(),
-            time: (get_time_us() / 1000 - get_current_task_first_time()),
-        };
-    }
+    let v_addr: VirtAddr = (ti as usize).into();
+    let pro = PROCESSOR.exclusive_access();
+    let current = pro.current();
+    let tcb_inner = current.as_ref().unwrap().inner_exclusive_access();
+    let syscall_times = tcb_inner.syscall_times;
+    let start_time = tcb_inner.start_time;
+    // drop(tcb_inner);
+    pro.set_val_in_current_task(
+        v_addr,
+        TaskInfo {
+            status: TaskStatus::Running,
+            syscall_times,
+            time: get_time_us() - start_time,
+        },
+    );
     0
 }
 
-// YOUR JOB: 实现sys_set_priority，为任务添加优先级
 pub fn sys_set_priority(prio: isize) -> isize {
     if prio < 2 {
         return -1;
     }
-    set_task_priority(prio as usize);
-    //println!("test {}", prio);
-    prio as isize
+    let current = current_task();
+    let mut inner = current.as_ref().unwrap().inner_exclusive_access();
+    inner.set_priority(prio as usize);
+    prio
+}
+
+bitflags! {
+    struct MmapPort : usize {
+        const R = 0b001;
+        const W = 0b010;
+        const X = 0b100;
+    }
 }
 
 // YOUR JOB: 扩展内核以实现 sys_mmap 和 sys_munmap
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    current_task_mmap(_start, _len, _port)
+pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
+    let Some(flags) = MmapPort::from_bits(port) else { return -1;};
+    let s_addr = VirtAddr::from(start);
+    let offset = s_addr.page_offset();
+    if port & 0b111 == 0 || offset != 0 {
+        // 1. Meaningless combination
+        // 2. start not aligned by page size
+
+        debug!("MMAP got invalid argument!, port = {port}, s_addr = {s_addr:?}, offset = {offset}");
+        return -1;
+    }
+    if len == 0 {
+        // No allocation at all.
+        // TODO: check
+        return 0;
+    }
+    let flags = MapPermission::U | MapPermission::from_bits((flags.bits as u8) << 1).unwrap();
+    trace!("PTEFlags: {flags:?}");
+    let task = current_task().unwrap();
+    let mut tcb_inner = task.inner_exclusive_access();
+    if tcb_inner
+        .memory_set
+        .mmap(s_addr, VirtAddr::from(start + len), flags)
+    {
+        0
+    } else {
+        -1
+    }
 }
 
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    current_task_munmap(_start, _len)
+pub fn sys_munmap(start: usize, len: usize) -> isize {
+    let s_addr = VirtAddr::from(start);
+    if s_addr.page_offset() != 0 {
+        // start not aligned by page size
+        return -1;
+    }
+    if len == 0 {
+        // no need to unmap
+        return 0;
+    }
+    let task = current_task().unwrap();
+    let mut tcb_inner = task.inner_exclusive_access();
+    if tcb_inner
+        .memory_set
+        .munmap(s_addr, VirtAddr::from(start + len))
+    {
+        0
+    } else {
+        -1
+    }
 }
 
 //
 // YOUR JOB: 实现 sys_spawn 系统调用
-// ALERT: 注意在实现 SPAWN 时不需要复制父进程地址空间，SPAWN != FORK + EXEC 
+// ALERT: 注意在实现 SPAWN 时不需要复制父进程地址空间，SPAWN != FORK + EXEC
 pub fn sys_spawn(path: *const u8) -> isize {
     let token = current_user_token();
     let path = translated_str(token, path);
-    if let Some(inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
-        let data = inode.read_all();
-        let task = current_task().unwrap();
-        let new_task = task.spawn(data.as_slice());
-        let pid = new_task.pid.0;
-        add_task(new_task);
-        pid as isize
-    } else {
-        -1
-    }
+    let Some(file) = open_file(path.as_str(), OpenFlags::RDONLY) else { return -1;};
+    let elf_data = file.read_all();
+    let Some(tcb) = current_task().unwrap().spawn(&elf_data) else { return -1; };
+    return tcb.getpid() as isize;
 }

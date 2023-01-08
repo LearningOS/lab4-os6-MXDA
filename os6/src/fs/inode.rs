@@ -1,22 +1,20 @@
-use easy_fs::{
-    EasyFileSystem,
-    Inode,
-};
+use super::File;
 use crate::drivers::BLOCK_DEVICE;
+use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
 use alloc::sync::Arc;
-use lazy_static::*;
-use bitflags::*;
 use alloc::vec::Vec;
-use super::File;
-use super::StatMode;
-use crate::mm::UserBuffer;
+use bitflags::*;
+use easy_fs::{EasyFileSystem, Inode};
+use lazy_static::*;
 
 /// A wrapper around a filesystem inode
 /// to implement File trait atop
 pub struct OSInode {
     readable: bool,
     writable: bool,
+    is_file: bool,
+    id: u64,
     inner: UPSafeCell<OSInodeInner>,
 }
 
@@ -28,18 +26,14 @@ pub struct OSInodeInner {
 
 impl OSInode {
     /// Construct an OS inode from a inode
-    pub fn new(
-        readable: bool,
-        writable: bool,
-        inode: Arc<Inode>,
-    ) -> Self {
+    pub fn new(readable: bool, writable: bool, id: u64, inode: Arc<Inode>) -> Self {
+        let is_file = inode.is_file();
         Self {
             readable,
             writable,
-            inner: unsafe { UPSafeCell::new(OSInodeInner {
-                offset: 0,
-                inode,
-            })},
+            is_file,
+            id,
+            inner: unsafe { UPSafeCell::new(OSInodeInner { offset: 0, inode }) },
         }
     }
     /// Read all data inside a inode into vector
@@ -56,6 +50,18 @@ impl OSInode {
             v.extend_from_slice(&buffer[..len]);
         }
         v
+    }
+
+    pub fn nlink(&self) -> u32 {
+        return self.inner.exclusive_access().inode.nlink();
+    }
+
+    pub fn ino(&self) -> u64 {
+        return self.id
+    }
+
+    pub fn is_file(&self) -> bool {
+        return self.is_file;
     }
 }
 
@@ -106,51 +112,33 @@ impl OpenFlags {
 pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
     let (readable, writable) = flags.read_write();
     if flags.contains(OpenFlags::CREATE) {
-        if let Some(inode) = ROOT_INODE.find(name) {
+        if let Some((id, inode)) = ROOT_INODE.find(name) {
             // clear size
             inode.clear();
-            Some(Arc::new(OSInode::new(
-                readable,
-                writable,
-                inode,
-            )))
+            Some(Arc::new(OSInode::new(readable, writable, id, inode)))
         } else {
             // create file
-            ROOT_INODE.create(name)
-                .map(|inode| {
-                    Arc::new(OSInode::new(
-                        readable,
-                        writable,
-                        inode,
-                    ))
-                })
+            ROOT_INODE
+                .create(name)
+                .map(|(id, inode)| Arc::new(OSInode::new(readable, writable, id, inode)))
         }
     } else {
-        ROOT_INODE.find(name)
-            .map(|inode| {
-                if flags.contains(OpenFlags::TRUNC) {
-                    inode.clear();
-                }
-                Arc::new(OSInode::new(
-                    readable,
-                    writable,
-                    inode
-                ))
-            })
+        ROOT_INODE.find(name).map(|(id, inode)| {
+            if flags.contains(OpenFlags::TRUNC) {
+                inode.clear();
+            }
+            Arc::new(OSInode::new(readable, writable, id, inode))
+        })
     }
 }
-pub fn link_file(old_name: &str, new_name: &str) -> Option<()> {
-    if old_name == new_name {
-        return None;
-    }
-    ROOT_INODE.link(old_name, new_name)
-}
-pub fn unlink_file(name: &str) -> Option<()> {
-    ROOT_INODE.unlink(name)
-}
+
 impl File for OSInode {
-    fn readable(&self) -> bool { self.readable }
-    fn writable(&self) -> bool { self.writable }
+    fn readable(&self) -> bool {
+        self.readable
+    }
+    fn writable(&self) -> bool {
+        self.writable
+    }
     fn read(&self, mut buf: UserBuffer) -> usize {
         let mut inner = self.inner.exclusive_access();
         let mut total_read_size = 0usize;
@@ -174,18 +162,5 @@ impl File for OSInode {
             total_write_size += write_size;
         }
         total_write_size
-    }
-    fn fstat(&self) -> (u64, StatMode, u32) {
-        let mut inner = self.inner.exclusive_access();
-        let ino = inner.inode.read_inode_id();
-        let (is_file, is_dir) = inner.inode.read_inode_mode();
-        let mut mode: StatMode = StatMode::NULL;
-        if is_file {
-            mode = StatMode::FILE;
-        } else {
-            mode = StatMode::DIR;
-        }
-        let nlink = inner.inode.read_inode_nlink();
-        (ino, mode, nlink)
     }
 }

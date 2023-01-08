@@ -1,9 +1,11 @@
+//! Implementation of [`PageTableEntry`] and [`PageTable`].
+
 use super::{frame_alloc, FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::*;
-use crate::task::current_user_token;
+
 bitflags! {
     /// page table entry flags
     pub struct PTEFlags: u8 {
@@ -140,6 +142,38 @@ impl PageTable {
     pub fn token(&self) -> usize {
         8usize << 60 | self.root_ppn.0
     }
+
+    pub fn mmap(&mut self, vpn: VirtPageNum, flags: PTEFlags) -> bool {
+        trace!("MMAP {vpn:?} BEGIN");
+        let pte = self.find_pte(vpn);
+        let pte = self.find_pte_create(vpn).unwrap();
+        assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
+        let Some(tracker) = frame_alloc() else { return false; };
+        let ppn = tracker.ppn;
+        *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
+        let pte = self.find_pte(vpn);
+        let pte = self.find_pte_create(vpn).unwrap();
+        self.frames.push(tracker);
+        trace!("MMAP {vpn:?} SUCCESS");
+        true
+    }
+
+    pub fn munmap(&mut self, vpn: VirtPageNum) -> bool {
+        let Some(pte) = self.find_pte_create(vpn) else { return false; };
+        let ppn = pte.ppn();
+
+        if !pte.is_valid() {
+            return false;
+        }
+        *pte = PageTableEntry::empty();
+        let id = self
+            .frames
+            .iter()
+            .position(|fr| fr.ppn == ppn)
+            .unwrap();
+        self.frames.remove(id);
+        true
+    }
 }
 
 /// translate a pointer to a mutable u8 Vec through page table
@@ -198,13 +232,6 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
         .translate_va(VirtAddr::from(va))
         .unwrap()
         .get_mut()
-}
-
-pub fn VirtAddr2PhysAddr(token: usize, ptr: *const u8) -> usize {
-    let page_table = PageTable::from_token(token);
-    let mut va = VirtAddr::from(ptr as usize);
-    let ppn = page_table.find_pte(va.floor()).unwrap().ppn();
-    PhysAddr::from(ppn).0 + va.page_offset()
 }
 
 /// An abstraction over a buffer passed from user space to kernel space
